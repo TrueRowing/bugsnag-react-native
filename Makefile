@@ -6,6 +6,7 @@ endif
 	@sed -i '' "s/\"version\": \".*\",/\"version\": \"$(VERSION)\",/" package.json
 	@sed -i '' "s/documentation-.*-blue.svg/documentation-$(VERSION)-blue.svg/" README.md
 	@sed -i '' "s/versionName \'.*\'/versionName \'$(VERSION)\'/" android/build.gradle
+	@sed -i '' "s/## TBD/## $(VERSION) ($(shell date '+%Y-%m-%d'))/" CHANGELOG.md
 
 
 # Makes a release and pushes to github/npm
@@ -39,6 +40,6 @@ ifeq ($(IOS_VERSION),)
 endif
 	@git -C ../bugsnag-cocoa fetch
 	@git -C ../bugsnag-cocoa checkout v$(IOS_VERSION)
-	@rsync --delete -al ../bugsnag-cocoa/Source cocoa/vendor/bugsnag-cocoa/Source
-	@rsync --delete -al ../bugsnag-cocoa/iOS cocoa/vendor/bugsnag-cocoa/iOS
+	@rsync --delete -al ../bugsnag-cocoa/Source/ cocoa/vendor/bugsnag-cocoa/Source/
+	@rsync --delete -al ../bugsnag-cocoa/iOS/ cocoa/vendor/bugsnag-cocoa/iOS/
 	@git status

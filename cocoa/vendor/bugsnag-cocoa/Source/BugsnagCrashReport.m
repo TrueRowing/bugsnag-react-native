@@ -235,10 +235,6 @@ static NSString *const DEFAULT_EXCEPTION_TYPE = @"cocoa";
         }
         _binaryImages = report[@"binary_images"];
         _breadcrumbs = BSGParseBreadcrumbs(report);
-        _severity = BSGParseSeverity(
-            [report valueForKeyPath:@"user.state.crash.severity"]);
-        _depth = [[report valueForKeyPath:@"user.state.crash.depth"]
-            unsignedIntegerValue];
         _dsymUUID = [report valueForKeyPath:@"system.app_uuid"];
         _deviceAppHash = [report valueForKeyPath:@"system.device_app_hash"];
         _metaData =
@@ -246,8 +242,8 @@ static NSString *const DEFAULT_EXCEPTION_TYPE = @"cocoa";
         _context = BSGParseContext(report, _metaData);
         _deviceState = BSGParseDeviceState(report);
         _device = BSGParseDevice(report);
-        _app = BSGParseApp(report[BSGKeySystem]);
-        _appState = BSGParseAppState(report[BSGKeySystem]);
+        _app = BSGParseApp(report);
+        _appState = BSGParseAppState(report[BSGKeySystem], [report valueForKeyPath:@"user.config.appVersion"]);
         _groupingHash = BSGParseGroupingHash(report, _metaData);
         _overrides = [report valueForKeyPath:@"user.overrides"];
         _customException = BSGParseCustomException(report, [_errorClass copy],
@@ -259,6 +255,10 @@ static NSString *const DEFAULT_EXCEPTION_TYPE = @"cocoa";
         if (recordedState) {
             _handledState =
                 [[BugsnagHandledState alloc] initWithDictionary:recordedState];
+
+            // only makes sense to use serialised value for handled exceptions
+            _depth = [[report valueForKeyPath:@"user.state.crash.depth"]
+                    unsignedIntegerValue];
         } else { // the event was unhandled.
             BOOL isSignal = [BSGKeySignal isEqualToString:_errorType];
             SeverityReasonType severityReason =
@@ -267,6 +267,7 @@ static NSString *const DEFAULT_EXCEPTION_TYPE = @"cocoa";
                 handledStateWithSeverityReason:severityReason
                                       severity:BSGSeverityError
                                      attrValue:_errorClass];
+            _depth = 0;
         }
         _severity = _handledState.currentSeverity;
 
@@ -483,7 +484,10 @@ initWithErrorName:(NSString *_Nonnull)name
     
     NSMutableDictionary *appObj = [NSMutableDictionary new];
     [appObj addEntriesFromDictionary:self.app];
-    [appObj addEntriesFromDictionary:self.appState];
+    
+    for (NSString *key in self.appState) {
+        BSGDictInsertIfNotNil(appObj, self.appState[key], key);
+    }
     
     if (self.dsymUUID) {
         BSGDictInsertIfNotNil(appObj, @[self.dsymUUID], @"dsymUUIDs");
@@ -549,12 +553,13 @@ initWithErrorName:(NSString *_Nonnull)name
 // Build all stacktraces for threads and the error
 - (NSArray *)serializeThreadsWithException:(NSMutableDictionary *)exception {
     NSMutableArray *bugsnagThreads = [NSMutableArray array];
-    for (NSDictionary *thread in [self threads]) {
+
+    for (NSDictionary *thread in self.threads) {
         NSArray *backtrace = thread[@"backtrace"][@"contents"];
         BOOL stackOverflow = [thread[@"stack"][@"overflow"] boolValue];
-        BOOL isCrashedThread = [thread[@"crashed"] boolValue];
+        BOOL isReportingThread = [thread[@"crashed"] boolValue];
         
-        if (isCrashedThread) {
+        if (isReportingThread) {
             NSUInteger seen = 0;
             NSMutableArray *stacktrace = [NSMutableArray array];
 
@@ -575,29 +580,38 @@ initWithErrorName:(NSString *_Nonnull)name
                         BSGFormatFrame(mutableFrame, [self binaryImages]));
                 }
             }
-
             BSGDictSetSafeObject(exception, stacktrace, BSGKeyStacktrace);
-        } else {
-            NSMutableArray *threadStack = [NSMutableArray array];
+        }
+        [self serialiseThread:bugsnagThreads thread:thread backtrace:backtrace reportingThread:isReportingThread];
+    }
+    return bugsnagThreads;
+}
 
-            for (NSDictionary *frame in backtrace) {
+- (void)serialiseThread:(NSMutableArray *)bugsnagThreads
+                 thread:(NSDictionary *)thread
+              backtrace:(NSArray *)backtrace
+          reportingThread:(BOOL)isReportingThread {
+    NSMutableArray *threadStack = [NSMutableArray array];
+
+    for (NSDictionary *frame in backtrace) {
                 BSGArrayInsertIfNotNil(
                     threadStack, BSGFormatFrame(frame, [self binaryImages]));
             }
 
-            NSMutableDictionary *threadDict = [NSMutableDictionary dictionary];
-            BSGDictSetSafeObject(threadDict, thread[@"index"], BSGKeyId);
-            BSGDictSetSafeObject(threadDict, threadStack, BSGKeyStacktrace);
-            BSGDictSetSafeObject(threadDict, DEFAULT_EXCEPTION_TYPE, BSGKeyType);
-            // only if this is enabled in BSG_KSCrash.
-            if (thread[BSGKeyName]) {
-                BSGDictSetSafeObject(threadDict, thread[BSGKeyName], BSGKeyName);
-            }
+    NSMutableDictionary *threadDict = [NSMutableDictionary dictionary];
+    BSGDictSetSafeObject(threadDict, thread[@"index"], BSGKeyId);
+    BSGDictSetSafeObject(threadDict, threadStack, BSGKeyStacktrace);
+    BSGDictSetSafeObject(threadDict, DEFAULT_EXCEPTION_TYPE, BSGKeyType);
 
-            BSGArrayAddSafeObject(bugsnagThreads, threadDict);
-        }
+    // only if this is enabled in BSG_KSCrash.
+    if (thread[BSGKeyName]) {
+        BSGDictSetSafeObject(threadDict, thread[BSGKeyName], BSGKeyName);
     }
-    return bugsnagThreads;
+    if (isReportingThread) {
+        BSGDictSetSafeObject(threadDict, @YES, @"errorReportingThread");
+    }
+
+    BSGArrayAddSafeObject(bugsnagThreads, threadDict);
 }
 
 - (NSString *_Nullable)enhancedErrorMessageForThread:(NSDictionary *_Nullable)thread {
@@ -626,9 +640,16 @@ initWithErrorName:(NSString *_Nonnull)name
             }
             NSString *contentValue = data[@"value"];
 
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "OCDFAInspection"
+            if (contentValue == nil || ![contentValue isKindOfClass:[NSString class]]) {
+                continue;
+            }
+#pragma clang diagnostic pop
+
             if ([self isReservedWord:contentValue]) {
                 reservedWord = contentValue;
-            } else if (!([[contentValue componentsSeparatedByString:@"/"] count] > 2)) {
+            } else if ([[contentValue componentsSeparatedByString:@"/"] count] <= 2) {
                 // must be a string that isn't a reserved word and isn't a filepath
                 [interestingValues addObject:contentValue];
             }

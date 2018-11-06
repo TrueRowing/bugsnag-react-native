@@ -1,1 +1,13 @@
+<<<<<<< HEAD
 examples
+=======
+*.tgz
+/examples
+/src
+/coverage
+/.github
+/yarn.lock
+/test
+/test-harness
+/.travis.yml
+>>>>>>> d6d96c4c4db97eb3b5bafa9f14c863cbcd27d22b
